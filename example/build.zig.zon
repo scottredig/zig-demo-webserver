@@ -1,0 +1,16 @@
+.{
+    .name = .demo_webserver_example,
+    .fingerprint = 0xabebe1855a1ee12f,
+    .version = "0.0.0",
+    .dependencies = .{
+        .demo_webserver = .{
+            .path = "../",
+        },
+    },
+    .paths = .{
+        "src",
+        "build",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
