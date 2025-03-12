@@ -1,6 +1,6 @@
 .{
     .name = .demo_webserver,
-    .fingerprint = 0xa7515d844d790a64,
+    .fingerprint = 0x9197eb3f0fe3c6b3,
     .version = "0.0.0",
     .dependencies = .{
         .mime = .{
