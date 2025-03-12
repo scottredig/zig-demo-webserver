@@ -1,5 +1,5 @@
 .{
-    .name = .live_webserver,
+    .name = .demo_webserver,
     .fingerprint = 0xa7515d844d790a64,
     .version = "0.0.0",
     .dependencies = .{
