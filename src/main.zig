@@ -11,11 +11,11 @@ var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 pub fn main() void {
     const gpa = general_purpose_allocator.allocator();
     const args = std.process.argsAlloc(gpa) catch |err| failWithError("Parse arguments", err);
-    log.info("server args: {s}", .{args});
 
     if (args.len != 3) {
         failWithError("Parse arguments", error.IncorrectNumberOfArguments);
     }
+    log.info("server args: {s} {s} {s}", .{args[0], args[1], args[2]});
 
     const port = std.fmt.parseInt(u16, args[1], 10) catch |err| failWithError("Parse port", err);
     const root_dir_path = args[2];
@@ -30,12 +30,11 @@ pub fn main() void {
 
     const address = std.net.Address.parseIp("127.0.0.1", port) catch |err| failWithError("obtain ip", err);
     var tcp_server = address.listen(.{
-        .reuse_port = true,
         .reuse_address = true,
     }) catch |err| failWithError("listen", err);
     defer tcp_server.deinit();
 
-    log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
+    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.listen_address.in});
 
     accept: while (true) {
         const request = gpa.create(Request) catch |err| {
@@ -79,9 +78,8 @@ const Request = struct {
     allocator: std.mem.Allocator,
     http: std.http.Server.Request,
 
-    // Not initialized in this code but utilized by http server.
-    buffer: [1024]u8,
-    response_buffer: [4000]u8,
+    read_buffer: [1024]u8,
+    write_buffer: [1024]u8,
 
     fn handle(req: *Request) void {
         defer req.gpa.destroy(req);
@@ -91,11 +89,14 @@ const Request = struct {
         defer req.allocator_arena.deinit();
         req.allocator = req.allocator_arena.allocator();
 
-        var http_server = std.http.Server.init(req.conn, &req.buffer);
+        var reader = req.conn.stream.reader(&req.read_buffer);
+        var writer = req.conn.stream.writer(&req.write_buffer);
+
+        var http_server = std.http.Server.init(reader.interface(), &writer.interface);
         req.http = http_server.receiveHead() catch |err| {
             if (err != error.HttpConnectionClosing) {
                 log.err("Error with getting request headers:{s}", .{@errorName(err)});
-                // TODO: We're supposed to server an error to the request on some of these
+                // TODO: We're supposed to serve an error to the request on some of these
                 // error types, but the http server doesn't give us the response to write to,
                 // so we're not going to bother doing it manually.
             }
@@ -154,11 +155,11 @@ const Request = struct {
         };
         defer file.close();
 
-        const metadata = file.metadata() catch |err| {
+        const stat = file.stat() catch |err| {
             req.serveError("accessing resource", .internal_server_error);
             return err;
         };
-        if (metadata.kind() == .directory) {
+        if (stat.kind == .directory) {
             const location = try std.fmt.allocPrint(
                 req.allocator,
                 "{s}/",
@@ -183,8 +184,7 @@ const Request = struct {
             },
         };
 
-        var response = req.http.respondStreaming(.{
-            .send_buffer = try req.allocator.alloc(u8, 4000),
+        var response = try req.http.respondStreaming(try req.allocator.alloc(u8, 4000), .{
             // .content_length = metadata.size(),
             .respond_options = .{
                 .extra_headers = &([_]std.http.Header{
@@ -192,7 +192,13 @@ const Request = struct {
                 } ++ common_headers),
             },
         });
-        try response.writer().writeFile(file);
+
+        var file_reader: std.fs.File.Reader = .{
+            .file = file,
+            .interface = std.fs.File.Reader.initInterface(&.{}),
+            .size = stat.size,
+        };
+        _ = try response.writer.sendFileAll(&file_reader, .unlimited);
         return response.end();
     }
 

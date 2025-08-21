@@ -30,9 +30,11 @@ pub fn build(b: *std.Build) void {
 
     const server = b.addExecutable(.{
         .name = "server",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     server.root_module.addImport("mime", mime.module("mime"));
 
