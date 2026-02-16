@@ -8,43 +8,51 @@ const log = std.log;
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 
-pub fn main() void {
-    const gpa = general_purpose_allocator.allocator();
-    const args = std.process.argsAlloc(gpa) catch |err| failWithError("Parse arguments", err);
+pub fn main(init: std.process.Init) void {
+    const gpa = init.gpa;
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| failWithError("Parse arguments", err);
+    const io = init.io;
 
     if (args.len != 3) {
         failWithError("Parse arguments", error.IncorrectNumberOfArguments);
     }
-    log.info("server args: {s} {s} {s}", .{args[0], args[1], args[2]});
+    log.info("server args: {s} {s} {s}", .{ args[0], args[1], args[2] });
 
     const port = std.fmt.parseInt(u16, args[1], 10) catch |err| failWithError("Parse port", err);
     const root_dir_path = args[2];
 
-    var root_dir: std.fs.Dir = std.fs.cwd().openDir(root_dir_path, .{}) catch |err| failWithError("Open serving directory", err);
+    var root_dir: std.Io.Dir = std.Io.Dir.cwd().openDir(io, root_dir_path, .{}) catch |err| failWithError("Open serving directory", err);
     defer root_dir.close();
 
-    var request_pool: std.Thread.Pool = undefined;
-    request_pool.init(.{
-        .allocator = gpa,
-    }) catch |err| failWithError("Start webserver threads", err);
-
-    const address = std.net.Address.parseIp("127.0.0.1", port) catch |err| failWithError("obtain ip", err);
-    var tcp_server = address.listen(.{
+    const address = std.Io.net.IpAddress.parse("127.0.0.1", port) catch |err| failWithError("obtain ip", err);
+    var tcp_server = address.listen(io, .{
         .reuse_address = true,
     }) catch |err| failWithError("listen", err);
     defer tcp_server.deinit();
 
-    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.listen_address.in});
+    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.socket.address});
+
+    var group: std.Io.Group = .init;
 
     accept: while (true) {
         const request = gpa.create(Request) catch |err| {
             failWithError("allocating request", err);
         };
-        request.gpa = gpa;
-        request.public_dir = root_dir;
-        request.conn = tcp_server.accept() catch |err| {
+        request.* = .{
+            .io = io,
+            .gpa = gpa,
+            .public_dir = root_dir,
+            .stream = undefined,
+
+            .allocator_arena = undefined,
+            .allocator = undefined,
+            .http = undefined,
+            .read_buffer = undefined,
+            .write_buffer = undefined,
+        };
+        request.stream = tcp_server.accept(io) catch |err| {
             switch (err) {
-                error.ConnectionAborted, error.ConnectionResetByPeer => {
+                error.ConnectionAborted => {
                     log.warn("{s} on lister accept", .{@errorName(err)});
                     gpa.destroy(request);
                     continue :accept;
@@ -54,10 +62,9 @@ pub fn main() void {
             failWithError("accept connection", err);
         };
 
-        request_pool.spawn(Request.handle, .{request}) catch |err| {
-            log.err("Error spawning request response thread: {s}", .{@errorName(err)});
-            request.conn.stream.close();
-            gpa.destroy(request);
+        // Can't use async because it's not guaranteed to run until group.await.
+        group.concurrent(io, Request.handle, .{request}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => request.handle(),
         };
     }
 }
@@ -68,11 +75,12 @@ fn failWithError(operation: []const u8, err: anytype) noreturn {
 }
 
 const Request = struct {
+    io: std.Io,
     // Fields are in initialization order.
     // Initialized by main.
     gpa: std.mem.Allocator,
-    public_dir: std.fs.Dir,
-    conn: std.net.Server.Connection,
+    public_dir: std.Io.Dir,
+    stream: std.Io.net.Stream,
     // Initialized by handle.
     allocator_arena: std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
@@ -83,16 +91,16 @@ const Request = struct {
 
     fn handle(req: *Request) void {
         defer req.gpa.destroy(req);
-        defer req.conn.stream.close();
+        defer req.stream.close(req.io);
 
         req.allocator_arena = std.heap.ArenaAllocator.init(req.gpa);
         defer req.allocator_arena.deinit();
         req.allocator = req.allocator_arena.allocator();
 
-        var reader = req.conn.stream.reader(&req.read_buffer);
-        var writer = req.conn.stream.writer(&req.write_buffer);
+        var reader = req.stream.reader(req.io, &req.read_buffer);
+        var writer = req.stream.writer(req.io, &req.write_buffer);
 
-        var http_server = std.http.Server.init(reader.interface(), &writer.interface);
+        var http_server = std.http.Server.init(&reader.interface, &writer.interface);
         req.http = http_server.receiveHead() catch |err| {
             if (err != error.HttpConnectionClosing) {
                 log.err("Error with getting request headers:{s}", .{@errorName(err)});
@@ -103,7 +111,7 @@ const Request = struct {
             return;
         };
         req.handleFile() catch |err| {
-            log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+            log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.stream.socket.address, req.http.head.target });
         };
     }
 
@@ -118,7 +126,7 @@ const Request = struct {
         if (std.mem.indexOf(u8, path, "..")) |_| {
             req.serveError("'..' not allowed in URLs", .bad_request);
 
-            // TODO: Allow relative paths while ensuring that directories
+            // Improvement: Allow relative paths while ensuring that directories
             // outside of the served directory can never be accessed.
             return error.BadPath;
         }
@@ -140,7 +148,7 @@ const Request = struct {
         const mime_type = mime.extension_map.get(std.fs.path.extension(path)) orelse
             .@"application/octet-stream";
 
-        const file = req.public_dir.openFile(path, .{}) catch |err| switch (err) {
+        const file = req.public_dir.openFile(req.io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 req.serveError(null, .not_found);
                 if (std.mem.eql(u8, path, "favicon.ico")) {
@@ -153,9 +161,9 @@ const Request = struct {
                 return err;
             },
         };
-        defer file.close();
+        defer file.close(req.io);
 
-        const stat = file.stat() catch |err| {
+        const stat = file.stat(req.io) catch |err| {
             req.serveError("accessing resource", .internal_server_error);
             return err;
         };
@@ -193,11 +201,7 @@ const Request = struct {
             },
         });
 
-        var file_reader: std.fs.File.Reader = .{
-            .file = file,
-            .interface = std.fs.File.Reader.initInterface(&.{}),
-            .size = stat.size,
-        };
+        var file_reader = file.reader(req.io, &.{});
         _ = try response.writer.sendFileAll(&file_reader, .unlimited);
         return response.end();
     }
