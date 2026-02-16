@@ -7,7 +7,12 @@ pub fn build(b: *std.Build) void {
 
     // Depend on the install step to run before running the webserver, implicitly
     // uses b.getInstallPath.  See the root build.zig for additional options.
-    const run_demo_server = demo_webserver.runDemoServer(b, b.getInstallStep(), .{});
+    const run_demo_server = demo_webserver.runDemoServer(b, b.getInstallStep(), .{
+        .additional_headers = &.{
+            .{ .name = "foo", .value = "hello world" },
+            .{ .name = "bar", .value = "such and such" },
+        },
+    });
     const serve = b.step("serve", "serve website locally");
     serve.dependOn(run_demo_server);
 }

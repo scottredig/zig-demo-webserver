@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub const DemoServerOptions = struct {
     port: u16 = 8080,
+    additional_headers: []const std.http.Header = &.{},
 };
 
 pub fn runDemoServer(b: *std.Build, build_step: *std.Build.Step, options: DemoServerOptions) *std.Build.Step {
@@ -14,6 +15,10 @@ pub fn runDemoServer(b: *std.Build, build_step: *std.Build.Step, options: DemoSe
     run_server.addArg(b.fmt("{d}", .{options.port}));
     // Would prefer to get a LazyPath from build_step, but don't see a way to do that.
     run_server.addArg(b.getInstallPath(.prefix, ""));
+    for (options.additional_headers) |header| {
+        run_server.addArg(header.name);
+        run_server.addArg(header.value);
+    }
     run_server.step.dependOn(build_step);
 
     return &run_server.step;

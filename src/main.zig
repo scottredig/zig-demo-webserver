@@ -13,10 +13,25 @@ pub fn main(init: std.process.Init) void {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| failWithError("Parse arguments", err);
     const io = init.io;
 
-    if (args.len != 3) {
+    if (args.len < 3) {
         failWithError("Parse arguments", error.IncorrectNumberOfArguments);
     }
-    log.info("server args: {s} {s} {s}", .{ args[0], args[1], args[2] });
+    log.info("server port: {s}", .{args[1]});
+    log.info("server serving directory: {s}", .{args[2]});
+    const header_args = args[3..];
+    if (header_args.len % 2 != 0) {
+        failWithError("Parse arguments", error.IncorrectNumberOfArguments);
+    }
+    const additional_headers = init.arena.allocator().alloc(std.http.Header, header_args.len / 2) catch |err| {
+        failWithError("Parse arguments", err);
+    };
+    for (0..header_args.len / 2) |i| {
+        additional_headers[i].name = header_args[i * 2];
+        additional_headers[i].value = header_args[i * 2 + 1];
+    }
+    for (additional_headers) |header| {
+        log.info("additional header: {s}: {s}", .{ header.name, header.value });
+    }
 
     const port = std.fmt.parseInt(u16, args[1], 10) catch |err| failWithError("Parse port", err);
     const root_dir_path = args[2];
@@ -42,6 +57,7 @@ pub fn main(init: std.process.Init) void {
             .io = io,
             .gpa = gpa,
             .public_dir = root_dir,
+            .additional_headers = additional_headers,
             .stream = undefined,
 
             .allocator_arena = undefined,
@@ -80,6 +96,7 @@ const Request = struct {
     // Initialized by main.
     gpa: std.mem.Allocator,
     public_dir: std.Io.Dir,
+    additional_headers: []const std.http.Header,
     stream: std.Io.net.Stream,
     // Initialized by handle.
     allocator_arena: std.heap.ArenaAllocator,
@@ -192,12 +209,15 @@ const Request = struct {
             },
         };
 
+        var extra_headers: std.ArrayList(std.http.Header) = .empty;
+        try extra_headers.append(req.allocator, .{ .name = "content-type", .value = content_type });
+        try extra_headers.appendSlice(req.allocator, &common_headers);
+        try extra_headers.appendSlice(req.allocator, req.additional_headers);
+
         var response = try req.http.respondStreaming(try req.allocator.alloc(u8, 4000), .{
             // .content_length = metadata.size(),
             .respond_options = .{
-                .extra_headers = &([_]std.http.Header{
-                    .{ .name = "content-type", .value = content_type },
-                } ++ common_headers),
+                .extra_headers = extra_headers.items,
             },
         });
 
