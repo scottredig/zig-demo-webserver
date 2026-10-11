@@ -6,20 +6,18 @@ pub const DemoServerOptions = struct {
     additional_headers: []const std.http.Header = &.{},
 };
 
-pub fn runDemoServer(b: *std.Build, build_step: *std.Build.Step, options: DemoServerOptions) *std.Build.Step {
+pub fn runDemoServer(b: *std.Build, files: *std.Build.Step.WriteFile, options: DemoServerOptions) *std.Build.Step {
     const optimize: std.builtin.OptimizeMode = .ReleaseSafe;
     const dep = b.dependencyFromBuildZig(@This(), .{
         .optimize = optimize,
     });
     const run_server = b.addRunArtifact(dep.artifact("server"));
     run_server.addArg(b.fmt("{d}", .{options.port}));
-    // Would prefer to get a LazyPath from build_step, but don't see a way to do that.
-    run_server.addArg(b.getInstallPath(.prefix, ""));
+    run_server.addDirectoryArg2(files.getDirectory(), .{});
     for (options.additional_headers) |header| {
         run_server.addArg(header.name);
         run_server.addArg(header.value);
     }
-    run_server.step.dependOn(build_step);
 
     return &run_server.step;
 }
